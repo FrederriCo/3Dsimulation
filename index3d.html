@@ -1,0 +1,442 @@
+
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Working 3D Solar System Simulation</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            margin: 0;
+            overflow: hidden; /* Important: Prevent scrollbars */
+            background-color: #000;
+            color: #fff;
+        }
+        #simulationCanvas {
+            position: absolute;
+            top: 0;
+            left: 0;
+            display: block;
+            width: 100vw;
+            height: 100vh;
+        }
+        .ui-panel {
+            position: absolute;
+            background-color: rgba(0, 0, 0, 0.75);
+            border: 1px solid #555;
+            border-radius: 8px;
+            padding: 10px;
+            color: #eee;
+            width: 250px;
+            z-index: 10; /* Make sure UI is on top of the canvas */
+        }
+        #topLeftControls { top: 15px; left: 15px; }
+    </style>
+</head>
+<body>
+
+    <!-- UI Panel from your description -->
+    <div id="topLeftControls" class="ui-panel">
+        <h3>Scenario & Controls</h3>
+        <label for="scenarioSelect">Scenario:</label>
+        <select id="scenarioSelect">
+            <option value="solar">Our Solar System</option>
+            <option value="binary">Binary Star System</option>
+            <option value="lagrange">Lagrange Points Demo</option>
+            <option value="threebody">Chaotic Three-Body System</option>
+        </select>
+        <br><br>
+        <label for="speedSlider">Simulation Speed: <span id="speedValue">1x</span></label>
+        <input type="range" id="speedSlider" min="-1" max="3" value="1" step="0.1">
+        <button id="playPauseBtn">Pause</button>
+        <br><br>
+        <button id="resetBtn">Reset</button>
+        <button id="saveBtn">Save</button>
+        <input type="file" id="loadInput" style="display:none" accept="application/json">
+        <button id="loadBtn">Load</button>
+        <br><br>
+        <label for="deleteSelect">Delete Object:</label>
+        <select id="deleteSelect"><option value="">-- Select --</option></select>
+        <button id="deleteBtn">Delete</button>
+    </div>
+
+    <!-- The actual simulation will be rendered here, but the canvas is created by JavaScript -->
+
+    <!-- Import Three.js and OrbitControls -->
+    <script type="importmap">
+        {
+            "imports": {
+                "three": "https://unpkg.com/three@0.165.0/build/three.module.js",
+                "three/addons/": "https://unpkg.com/three@0.165.0/examples/jsm/"
+            }
+        }
+    </script>
+
+    <script type="module">
+        import * as THREE from 'three';
+        import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+
+        // ====================================================================
+        // 1. SCENE SETUP
+        // ====================================================================
+
+        const scene = new THREE.Scene();
+        const camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 2000);
+        camera.position.set(0, 5, 15); // Start camera position
+
+        const renderer = new THREE.WebGLRenderer({ antialias: true });
+        renderer.setSize(window.innerWidth, window.innerHeight);
+        document.body.appendChild(renderer.domElement);
+
+        // Add interactive camera controls (rotate, zoom, pan)
+        const controls = new OrbitControls(camera, renderer.domElement);
+        controls.enableDamping = true; // Makes movement feel smoother
+        controls.dampingFactor = 0.05;
+
+        // Handle window resizing
+        window.addEventListener('resize', () => {
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+        });
+
+        // ====================================================================
+        // 2. CREATE CELESTIAL OBJECTS
+        // ====================================================================
+
+        // A. The Sun (created in scenario loader)
+        let sunLight = null;
+        
+        // Add ambient light so objects on the dark side are not completely black
+        const ambientLight = new THREE.AmbientLight(0xffffff, 0.1);
+        scene.add(ambientLight);
+
+        // B. Planets
+        // Array to hold planet objects and their orbit data
+        let planets = [];
+        let objects = []; // All objects (planets, stars, etc) for management
+        let sun = null;
+
+        // Helper to add a planet and its orbit
+        function addPlanet({ name, color, size, distance, orbitSpeed, initialAngle }) {
+            const geometry = new THREE.SphereGeometry(size, 32, 32);
+            const material = new THREE.MeshStandardMaterial({ color });
+            const mesh = new THREE.Mesh(geometry, material);
+            mesh.position.x = Math.cos(initialAngle) * distance;
+            mesh.position.z = Math.sin(initialAngle) * distance;
+            scene.add(mesh);
+
+            // Add planet name label (using a Sprite)
+            const canvas = document.createElement('canvas');
+            canvas.width = 256;
+            canvas.height = 64;
+            const ctx = canvas.getContext('2d');
+            ctx.font = '32px Arial';
+            ctx.textAlign = 'center';
+            ctx.textBaseline = 'middle';
+            ctx.fillStyle = '#fff';
+            ctx.strokeStyle = '#222';
+            ctx.lineWidth = 6;
+            ctx.strokeText(name, 128, 32);
+            ctx.fillText(name, 128, 32);
+            const texture = new THREE.CanvasTexture(canvas);
+            const spriteMaterial = new THREE.SpriteMaterial({ map: texture, transparent: true });
+            const sprite = new THREE.Sprite(spriteMaterial);
+            sprite.scale.set(2.5, 0.6, 1); // Adjust label size
+            sprite.position.set(mesh.position.x, mesh.position.y + size + 0.7, mesh.position.z);
+            scene.add(sprite);
+
+            // Orbit path
+            const orbitGeometry = new THREE.TorusGeometry(distance, 0.05, 16, 100);
+            const orbitMaterial = new THREE.MeshBasicMaterial({ color: 0x333333 });
+            const orbit = new THREE.Mesh(orbitGeometry, orbitMaterial);
+            orbit.rotation.x = Math.PI / 2;
+            scene.add(orbit);
+
+            const planetObj = { type: 'planet', name, mesh, distance, orbitSpeed, angle: initialAngle, label: sprite, size, orbit };
+            planets.push(planetObj);
+            objects.push(planetObj);
+            updateDeleteDropdown();
+            return planetObj;
+        }
+
+        // Helper to add a star (for binary/three-body)
+        function addStar({ name, color, size, position, velocity }) {
+            const geometry = new THREE.SphereGeometry(size, 32, 32);
+            const material = new THREE.MeshBasicMaterial({ color });
+            const mesh = new THREE.Mesh(geometry, material);
+            mesh.position.copy(position);
+            scene.add(mesh);
+
+            // Label
+            const canvas = document.createElement('canvas');
+            canvas.width = 256;
+            canvas.height = 64;
+            const ctx = canvas.getContext('2d');
+            ctx.font = '32px Arial';
+            ctx.textAlign = 'center';
+            ctx.textBaseline = 'middle';
+            ctx.fillStyle = '#fff';
+            ctx.strokeStyle = '#222';
+            ctx.lineWidth = 6;
+            ctx.strokeText(name, 128, 32);
+            ctx.fillText(name, 128, 32);
+            const texture = new THREE.CanvasTexture(canvas);
+            const spriteMaterial = new THREE.SpriteMaterial({ map: texture, transparent: true });
+            const sprite = new THREE.Sprite(spriteMaterial);
+            sprite.scale.set(2.5, 0.6, 1);
+            sprite.position.set(position.x, position.y + size + 0.7, position.z);
+            scene.add(sprite);
+
+            const starObj = { type: 'star', name, mesh, size, label: sprite, velocity: velocity ? velocity.clone() : new THREE.Vector3(), position: mesh.position };
+            objects.push(starObj);
+            updateDeleteDropdown();
+            return starObj;
+        }
+
+        // Remove all planets, stars, and their visuals
+        function clearObjects() {
+            for (const obj of objects) {
+                scene.remove(obj.mesh);
+                if (obj.label) scene.remove(obj.label);
+                if (obj.orbit) scene.remove(obj.orbit);
+            }
+            planets = [];
+            objects = [];
+            sun = null;
+            updateDeleteDropdown();
+        }
+
+        // Update delete dropdown
+        function updateDeleteDropdown() {
+            const delSel = document.getElementById('deleteSelect');
+            delSel.innerHTML = '<option value="">-- Select --</option>';
+            for (let i = 0; i < objects.length; i++) {
+                delSel.innerHTML += `<option value="${i}">${objects[i].name}</option>`;
+            }
+        }
+
+        // Scenario definitions
+        function loadSolarSystem() {
+            clearObjects();
+            // Add Sun
+            sun = addStar({ name: 'Sun', color: 0xffff00, size: 2, position: new THREE.Vector3(0, 0, 0) });
+            // Add a point light to simulate the Sun's light
+            if (sunLight) scene.remove(sunLight);
+            sunLight = new THREE.PointLight(0xffffff, 3, 1000);
+            scene.add(sunLight);
+            addPlanet({ name: 'Mercury', color: 0xb5b5b5, size: 0.19, distance: 4, orbitSpeed: 1.6, initialAngle: 0 });
+            addPlanet({ name: 'Venus', color: 0xeccc9a, size: 0.47, distance: 7, orbitSpeed: 1.2, initialAngle: 0.5 });
+            addPlanet({ name: 'Earth', color: 0x0099ff, size: 0.5, distance: 10, orbitSpeed: 1, initialAngle: 1 });
+            addPlanet({ name: 'Mars', color: 0xff5533, size: 0.27, distance: 13, orbitSpeed: 0.8, initialAngle: 1.5 });
+            addPlanet({ name: 'Jupiter', color: 0xf4e2b6, size: 1.1, distance: 17, orbitSpeed: 0.4, initialAngle: 2 });
+            addPlanet({ name: 'Saturn', color: 0xf7e7b6, size: 0.95, distance: 21, orbitSpeed: 0.3, initialAngle: 2.5 });
+            addPlanet({ name: 'Uranus', color: 0x7de0f7, size: 0.7, distance: 25, orbitSpeed: 0.2, initialAngle: 3 });
+            addPlanet({ name: 'Neptune', color: 0x4666ff, size: 0.68, distance: 29, orbitSpeed: 0.15, initialAngle: 3.5 });
+        }
+
+        function loadBinaryStar() {
+            clearObjects();
+            const starA = addStar({ name: 'Star A', color: 0xffee88, size: 1.5, position: new THREE.Vector3(-3, 0, 0) });
+            const starB = addStar({ name: 'Star B', color: 0x88aaff, size: 1.2, position: new THREE.Vector3(3, 0, 0) });
+            addPlanet({ name: 'Planet', color: 0x00ff99, size: 0.7, distance: 8, orbitSpeed: 0.7, initialAngle: 0 });
+        }
+
+        function loadLagrangeDemo() {
+            clearObjects();
+            const earth = addPlanet({ name: 'Earth', color: 0x0099ff, size: 0.5, distance: 8, orbitSpeed: 1, initialAngle: 0 });
+            const moon = addPlanet({ name: 'Moon', color: 0xcccccc, size: 0.15, distance: 1.5, orbitSpeed: 4, initialAngle: 0 });
+            // Place a satellite at L4 (60 deg ahead of moon)
+            const satAngle = Math.PI / 3;
+            const satDistance = 8 + 1.5; // Earth-moon distance from center
+            const sat = addPlanet({ name: 'Satellite (L4)', color: 0xff00ff, size: 0.1, distance: satDistance, orbitSpeed: 1, initialAngle: satAngle });
+        }
+
+        function loadThreeBody() {
+            clearObjects();
+            addStar({ name: 'Star 1', color: 0xffee88, size: 1.2, position: new THREE.Vector3(-2, 0, 0) });
+            addStar({ name: 'Star 2', color: 0x88aaff, size: 1.2, position: new THREE.Vector3(2, 0, 0) });
+            addPlanet({ name: 'Planet', color: 0x00ff99, size: 0.7, distance: 4, orbitSpeed: 1.2, initialAngle: 0 });
+        }
+
+        // Load default scenario
+        loadSolarSystem();
+
+        // D. Background Stars
+        const starGeometry = new THREE.BufferGeometry();
+        const starMaterial = new THREE.PointsMaterial({ color: 0xffffff, size: 0.05 });
+        const starVertices = [];
+        for (let i = 0; i < 10000; i++) {
+            const x = (Math.random() - 0.5) * 2000;
+            const y = (Math.random() - 0.5) * 2000;
+            const z = (Math.random() - 0.5) * 2000;
+            starVertices.push(x, y, z);
+        }
+        starGeometry.setAttribute('position', new THREE.Float32BufferAttribute(starVertices, 3));
+        const stars = new THREE.Points(starGeometry, starMaterial);
+        scene.add(stars);
+
+
+        // ====================================================================
+        // 3. SIMULATION STATE & CONTROLS
+        // ====================================================================
+
+        let isPaused = false;
+        let simulationSpeed = 1;
+
+        // Link UI controls to the simulation state
+        const speedSlider = document.getElementById('speedSlider');
+        const speedValueSpan = document.getElementById('speedValue');
+        const playPauseBtn = document.getElementById('playPauseBtn');
+        const scenarioSelect = document.getElementById('scenarioSelect');
+        const resetBtn = document.getElementById('resetBtn');
+        const saveBtn = document.getElementById('saveBtn');
+        const loadBtn = document.getElementById('loadBtn');
+        const loadInput = document.getElementById('loadInput');
+        const deleteBtn = document.getElementById('deleteBtn');
+        const deleteSelect = document.getElementById('deleteSelect');
+
+        speedSlider.addEventListener('input', () => {
+            simulationSpeed = Math.pow(10, parseFloat(speedSlider.value));
+            speedValueSpan.textContent = `${simulationSpeed.toFixed(1)}x`;
+        });
+
+        playPauseBtn.addEventListener('click', () => {
+            isPaused = !isPaused;
+            playPauseBtn.textContent = isPaused ? 'Play' : 'Pause';
+        });
+
+        scenarioSelect.addEventListener('change', () => {
+            if (scenarioSelect.value === 'solar') loadSolarSystem();
+            else if (scenarioSelect.value === 'binary') loadBinaryStar();
+            else if (scenarioSelect.value === 'lagrange') loadLagrangeDemo();
+            else if (scenarioSelect.value === 'threebody') loadThreeBody();
+        });
+
+        resetBtn.addEventListener('click', () => {
+            if (scenarioSelect.value === 'solar') loadSolarSystem();
+            else if (scenarioSelect.value === 'binary') loadBinaryStar();
+            else if (scenarioSelect.value === 'lagrange') loadLagrangeDemo();
+            else if (scenarioSelect.value === 'threebody') loadThreeBody();
+        });
+
+        saveBtn.addEventListener('click', () => {
+            const saveData = objects.map(obj => {
+                if (obj.type === 'planet') {
+                    return {
+                        type: 'planet',
+                        name: obj.name,
+                        color: obj.mesh.material.color.getHex(),
+                        size: obj.size,
+                        distance: obj.distance,
+                        orbitSpeed: obj.orbitSpeed,
+                        angle: obj.angle
+                    };
+                } else if (obj.type === 'star') {
+                    return {
+                        type: 'star',
+                        name: obj.name,
+                        color: obj.mesh.material.color.getHex(),
+                        size: obj.size,
+                        position: { x: obj.mesh.position.x, y: obj.mesh.position.y, z: obj.mesh.position.z }
+                    };
+                }
+            });
+            const blob = new Blob([JSON.stringify(saveData, null, 2)], { type: 'application/json' });
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = 'solar_system.json';
+            a.click();
+            URL.revokeObjectURL(url);
+        });
+
+        loadBtn.addEventListener('click', () => {
+            loadInput.click();
+        });
+        loadInput.addEventListener('change', (e) => {
+            const file = e.target.files[0];
+            if (!file) return;
+            const reader = new FileReader();
+            reader.onload = function(evt) {
+                try {
+                    const data = JSON.parse(evt.target.result);
+                    clearObjects();
+                    for (const obj of data) {
+                        if (obj.type === 'planet') {
+                            addPlanet(obj);
+                        } else if (obj.type === 'star') {
+                            addStar({
+                                name: obj.name,
+                                color: obj.color,
+                                size: obj.size,
+                                position: new THREE.Vector3(obj.position.x, obj.position.y, obj.position.z)
+                            });
+                        }
+                    }
+                } catch (err) {
+                    alert('Failed to load file: ' + err.message);
+                }
+            };
+            reader.readAsText(file);
+        });
+
+        deleteBtn.addEventListener('click', () => {
+            const idx = parseInt(deleteSelect.value);
+            if (isNaN(idx) || idx < 0 || idx >= objects.length) return;
+            const obj = objects[idx];
+            scene.remove(obj.mesh);
+            if (obj.label) scene.remove(obj.label);
+            if (obj.orbit) scene.remove(obj.orbit);
+            objects.splice(idx, 1);
+            if (obj.type === 'planet') {
+                const pidx = planets.indexOf(obj);
+                if (pidx !== -1) planets.splice(pidx, 1);
+            }
+            updateDeleteDropdown();
+        });
+
+
+        // ====================================================================
+        // 4. ANIMATION LOOP
+        // ====================================================================
+
+        const clock = new THREE.Clock();
+        // Remove earthOrbitAngle, use per-planet angle
+
+        function animate() {
+            requestAnimationFrame(animate);
+            const deltaTime = clock.getDelta();
+
+            if (!isPaused) {
+                // Animate all stars (spin)
+                for (const obj of objects) {
+                    if (obj.type === 'star') {
+                        obj.mesh.rotation.y += 0.05 * deltaTime;
+                        if (obj.label) obj.label.position.set(obj.mesh.position.x, obj.mesh.position.y + obj.size + 0.7, obj.mesh.position.z);
+                    }
+                }
+                // Animate all planets' orbits
+                for (const planet of planets) {
+                    planet.angle += planet.orbitSpeed * deltaTime * simulationSpeed * 0.5;
+                    planet.mesh.position.x = Math.cos(planet.angle) * planet.distance;
+                    planet.mesh.position.z = Math.sin(planet.angle) * planet.distance;
+                    planet.mesh.rotation.y += 0.5 * deltaTime;
+                    // Update label position to follow planet
+                    planet.label.position.set(
+                        planet.mesh.position.x,
+                        planet.mesh.position.y + planet.size + 0.7,
+                        planet.mesh.position.z
+                    );
+                }
+            }
+
+            controls.update();
+            renderer.render(scene, camera);
+        }
+        animate();
+    </script>
+</body>
+</html>
+
